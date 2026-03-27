@@ -10,6 +10,7 @@ dotenv.config();
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID; // optional – if not set, commands are global
+const PANEL_CHANNEL_ID = process.env.PANEL_CHANNEL_ID; // channel where the ticket panel will be sent
 const PORT = process.env.PORT || 3000;
 
 // Category where tickets will be created
@@ -42,7 +43,10 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName('uber-order')
-    .setDescription('Create a new Uber Eats group order ticket')
+    .setDescription('Create a new Uber Eats group order ticket'),
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Send the ticket creation panel in the configured channel')
 ];
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -60,6 +64,42 @@ async function registerCommands() {
   } catch (error) {
     console.error('Failed to register commands:', error);
   }
+}
+
+// ================================
+//  Helper: Send / refresh ticket panel
+// ================================
+async function sendTicketPanel(channelId) {
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    console.error(`Panel channel ${channelId} not found or not a text channel.`);
+    return;
+  }
+
+  // Optional: remove any existing panels from this bot to avoid clutter
+  const messages = await channel.messages.fetch({ limit: 10 });
+  const existingPanel = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title === '🍔 Uber Eats Ticket Panel');
+  if (existingPanel) {
+    console.log('Panel already exists, skipping...');
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('🍔 Uber Eats Ticket Panel')
+    .setDescription('Click the button below to create a new Uber Eats group order ticket.')
+    .setColor(0x00FF00)
+    .setFooter({ text: 'Your orders will be handled in a private channel.' });
+
+  const createButton = new ButtonBuilder()
+    .setCustomId('create_ticket')
+    .setLabel('Create Ticket')
+    .setStyle(ButtonStyle.Primary)
+    .setEmoji('📝');
+
+  const row = new ActionRowBuilder().addComponents(createButton);
+
+  await channel.send({ embeds: [embed], components: [row] });
+  console.log(`Ticket panel sent to ${channel.name} (${channelId})`);
 }
 
 // ================================
@@ -201,32 +241,79 @@ async function handleModalSubmit(interaction) {
 }
 
 // ================================
-//  Button Handler (Close Ticket)
+//  Button Handler (Create Ticket & Close)
 // ================================
 async function handleButtonInteraction(interaction) {
   if (!interaction.isButton()) return;
-  if (interaction.customId !== 'close_ticket') return;
 
-  const channel = interaction.channel;
-  const member = interaction.member;
-  const userId = member.id;
+  if (interaction.customId === 'create_ticket') {
+    // Show the modal
+    const modal = new ModalBuilder()
+      .setCustomId('uberOrderModal')
+      .setTitle('Uber Eats Group Order');
 
-  // Permission check: allow if user is ticket creator OR has any allowed role
-  const isCreator = channel.topic?.includes(userId);
-  const hasAllowedRole = ALLOWED_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
+    const orderDetailsInput = new TextInputBuilder()
+      .setCustomId('orderDetails')
+      .setLabel('Order Details (e.g., items, restaurant)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('2x Big Mac, 1x Fries, etc.');
 
-  if (!isCreator && !hasAllowedRole) {
-    return interaction.reply({ content: '❌ You do not have permission to close this ticket.', ephemeral: true });
+    const addressInput = new TextInputBuilder()
+      .setCustomId('address')
+      .setLabel('Delivery Address')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('123 Main St, Apt 4B');
+
+    const paymentMethodInput = new TextInputBuilder()
+      .setCustomId('paymentMethod')
+      .setLabel('Payment Method')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('Venmo @username, PayPal, etc.');
+
+    const notesInput = new TextInputBuilder()
+      .setCustomId('additionalNotes')
+      .setLabel('Additional Notes (optional)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(false)
+      .setPlaceholder('Any special instructions...');
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(orderDetailsInput),
+      new ActionRowBuilder().addComponents(addressInput),
+      new ActionRowBuilder().addComponents(paymentMethodInput),
+      new ActionRowBuilder().addComponents(notesInput)
+    );
+
+    await interaction.showModal(modal);
+    return;
   }
 
-  await interaction.reply({ content: '🔒 Closing ticket...', ephemeral: true });
-  setTimeout(async () => {
-    try {
-      await channel.delete();
-    } catch (err) {
-      console.error('Failed to delete channel:', err);
+  if (interaction.customId === 'close_ticket') {
+    const channel = interaction.channel;
+    const member = interaction.member;
+    const userId = member.id;
+
+    // Permission check: allow if user is ticket creator OR has any allowed role
+    const isCreator = channel.topic?.includes(userId);
+    const hasAllowedRole = ALLOWED_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
+
+    if (!isCreator && !hasAllowedRole) {
+      return interaction.reply({ content: '❌ You do not have permission to close this ticket.', ephemeral: true });
     }
-  }, 1000);
+
+    await interaction.reply({ content: '🔒 Closing ticket...', ephemeral: true });
+    setTimeout(async () => {
+      try {
+        await channel.delete();
+      } catch (err) {
+        console.error('Failed to delete channel:', err);
+      }
+    }, 1000);
+    return;
+  }
 }
 
 // ================================
@@ -234,49 +321,65 @@ async function handleButtonInteraction(interaction) {
 // ================================
 async function handleSlashCommand(interaction) {
   if (!interaction.isCommand()) return;
-  if (interaction.commandName !== 'uber-order') return;
 
-  // Create modal
-  const modal = new ModalBuilder()
-    .setCustomId('uberOrderModal')
-    .setTitle('Uber Eats Group Order');
+  if (interaction.commandName === 'uber-order') {
+    // Show the modal (same as button)
+    const modal = new ModalBuilder()
+      .setCustomId('uberOrderModal')
+      .setTitle('Uber Eats Group Order');
 
-  const orderDetailsInput = new TextInputBuilder()
-    .setCustomId('orderDetails')
-    .setLabel('Order Details (e.g., items, restaurant)')
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setPlaceholder('2x Big Mac, 1x Fries, etc.');
+    const orderDetailsInput = new TextInputBuilder()
+      .setCustomId('orderDetails')
+      .setLabel('Order Details (e.g., items, restaurant)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('2x Big Mac, 1x Fries, etc.');
 
-  const addressInput = new TextInputBuilder()
-    .setCustomId('address')
-    .setLabel('Delivery Address')
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setPlaceholder('123 Main St, Apt 4B');
+    const addressInput = new TextInputBuilder()
+      .setCustomId('address')
+      .setLabel('Delivery Address')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('123 Main St, Apt 4B');
 
-  const paymentMethodInput = new TextInputBuilder()
-    .setCustomId('paymentMethod')
-    .setLabel('Payment Method')
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setPlaceholder('Venmo @username, PayPal, etc.');
+    const paymentMethodInput = new TextInputBuilder()
+      .setCustomId('paymentMethod')
+      .setLabel('Payment Method')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('Venmo @username, PayPal, etc.');
 
-  const notesInput = new TextInputBuilder()
-    .setCustomId('additionalNotes')
-    .setLabel('Additional Notes (optional)')
-    .setStyle(TextInputStyle.Paragraph)
-    .setRequired(false)
-    .setPlaceholder('Any special instructions...');
+    const notesInput = new TextInputBuilder()
+      .setCustomId('additionalNotes')
+      .setLabel('Additional Notes (optional)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(false)
+      .setPlaceholder('Any special instructions...');
 
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(orderDetailsInput),
-    new ActionRowBuilder().addComponents(addressInput),
-    new ActionRowBuilder().addComponents(paymentMethodInput),
-    new ActionRowBuilder().addComponents(notesInput)
-  );
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(orderDetailsInput),
+      new ActionRowBuilder().addComponents(addressInput),
+      new ActionRowBuilder().addComponents(paymentMethodInput),
+      new ActionRowBuilder().addComponents(notesInput)
+    );
 
-  await interaction.showModal(modal);
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.commandName === 'panel') {
+    if (!PANEL_CHANNEL_ID) {
+      return interaction.reply({ content: '❌ PANEL_CHANNEL_ID is not set in environment variables.', ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      await sendTicketPanel(PANEL_CHANNEL_ID);
+      await interaction.editReply({ content: `✅ Ticket panel sent to <#${PANEL_CHANNEL_ID}>.`, ephemeral: true });
+    } catch (error) {
+      console.error('Error sending panel:', error);
+      await interaction.editReply({ content: `❌ Failed to send panel: ${error.message}`, ephemeral: true });
+    }
+  }
 }
 
 // ================================
@@ -289,9 +392,21 @@ app.listen(PORT, () => console.log(`Web server listening on port ${PORT}`));
 // ================================
 //  Bot Ready Event
 // ================================
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();
+
+  // Send the ticket panel on startup if configured
+  if (PANEL_CHANNEL_ID) {
+    try {
+      await sendTicketPanel(PANEL_CHANNEL_ID);
+    } catch (err) {
+      console.error('Failed to send initial ticket panel:', err);
+    }
+  } else {
+    console.warn('PANEL_CHANNEL_ID not set. No ticket panel will be sent automatically.');
+  }
+
   console.log('Bot is ready!');
 });
 
