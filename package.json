@@ -1,0 +1,17 @@
+{
+  "name": "uber-eats-ticket-bot",
+  "version": "1.0.0",
+  "description": "Discord ticket bot for Uber Eats group orders",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
